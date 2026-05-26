@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mortgage Calculator</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+      width: 100%;
+      max-width: 520px;
+      overflow: hidden;
+    }
+
+    .card-header {
+      background: linear-gradient(135deg, #1a56db 0%, #0e3da8 100%);
+      padding: 32px 36px 28px;
+      color: #fff;
+    }
+
+    .card-header h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+    }
+
+    .card-header p {
+      margin-top: 6px;
+      font-size: 0.92rem;
+      opacity: 0.82;
+    }
+
+    .card-body {
+      padding: 32px 36px;
+    }
+
+    .field {
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #374151;
+      margin-bottom: 6px;
+    }
+
+    .input-wrap {
+      position: relative;
+    }
+
+    .input-wrap .prefix,
+    .input-wrap .suffix {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 0.95rem;
+      color: #6b7280;
+      pointer-events: none;
+      font-weight: 500;
+    }
+
+    .input-wrap .prefix { left: 12px; }
+    .input-wrap .suffix { right: 12px; }
+
+    input[type="number"] {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1.5px solid #d1d5db;
+      border-radius: 8px;
+      font-size: 1rem;
+      color: #111827;
+      background: #f9fafb;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      -moz-appearance: textfield;
+    }
+
+    input[type="number"]::-webkit-outer-spin-button,
+    input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; }
+
+    input[type="number"]:focus {
+      outline: none;
+      border-color: #1a56db;
+      background: #fff;
+      box-shadow: 0 0 0 3px rgba(26,86,219,0.12);
+    }
+
+    .has-prefix input { padding-left: 28px; }
+    .has-suffix input { padding-right: 32px; }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .divider {
+      border: none;
+      border-top: 1.5px solid #f3f4f6;
+      margin: 24px 0;
+    }
+
+    button {
+      width: 100%;
+      padding: 13px;
+      background: linear-gradient(135deg, #1a56db 0%, #0e3da8 100%);
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 700;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      letter-spacing: 0.2px;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+
+    button:hover { opacity: 0.92; }
+    button:active { transform: scale(0.99); }
+
+    .results {
+      margin-top: 28px;
+      background: #f0f4ff;
+      border-radius: 12px;
+      padding: 24px;
+      display: none;
+    }
+
+    .results.visible { display: block; }
+
+    .results h2 {
+      font-size: 0.85rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: #6b7280;
+      margin-bottom: 16px;
+    }
+
+    .total-payment {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+
+    .total-payment .amount {
+      font-size: 2.4rem;
+      font-weight: 800;
+      color: #1a56db;
+      letter-spacing: -1px;
+    }
+
+    .total-payment .label {
+      font-size: 0.82rem;
+      color: #6b7280;
+      margin-top: 2px;
+    }
+
+    .breakdown {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .breakdown-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 14px;
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }
+
+    .breakdown-item .name {
+      font-size: 0.9rem;
+      color: #374151;
+      font-weight: 500;
+    }
+
+    .breakdown-item .value {
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: #111827;
+    }
+
+    .error {
+      color: #dc2626;
+      font-size: 0.82rem;
+      margin-top: 4px;
+      display: none;
+    }
+
+    @media (max-width: 480px) {
+      .card-header, .card-body { padding: 24px 20px; }
+      .row { grid-template-columns: 1fr; gap: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="card-header">
+      <h1>Mortgage Calculator</h1>
+      <p>Estimate your monthly home payment</p>
+    </div>
+    <div class="card-body">
+      <div class="field">
+        <label for="salePrice">Sale Price</label>
+        <div class="input-wrap has-prefix">
+          <span class="prefix">$</span>
+          <input type="number" id="salePrice" placeholder="350,000" min="0" step="1000" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="downPayment">Down Payment</label>
+          <div class="input-wrap has-prefix">
+            <span class="prefix">$</span>
+            <input type="number" id="downPayment" placeholder="70,000" min="0" step="1000" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="loanTerm">Loan Term</label>
+          <div class="input-wrap has-suffix">
+            <input type="number" id="loanTerm" placeholder="30" min="1" max="50" value="30" />
+            <span class="suffix">yrs</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="interestRate">Annual Interest Rate</label>
+        <div class="input-wrap has-suffix">
+          <input type="number" id="interestRate" placeholder="6.5" min="0" max="30" step="0.01" />
+          <span class="suffix">%</span>
+        </div>
+      </div>
+
+      <hr class="divider" />
+
+      <div class="row">
+        <div class="field">
+          <label for="propertyTax">Annual Property Tax</label>
+          <div class="input-wrap has-prefix">
+            <span class="prefix">$</span>
+            <input type="number" id="propertyTax" placeholder="4,200" min="0" step="100" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="insurance">Annual Home Insurance</label>
+          <div class="input-wrap has-prefix">
+            <span class="prefix">$</span>
+            <input type="number" id="insurance" placeholder="1,200" min="0" step="100" />
+          </div>
+        </div>
+      </div>
+
+      <p class="error" id="errorMsg">Please fill in all required fields with valid values.</p>
+
+      <button onclick="calculate()">Calculate Monthly Payment</button>
+
+      <div class="results" id="results">
+        <h2>Monthly Breakdown</h2>
+        <div class="total-payment">
+          <div class="amount" id="totalPayment">$0</div>
+          <div class="label">estimated total monthly payment</div>
+        </div>
+        <div class="breakdown">
+          <div class="breakdown-item">
+            <span class="name">Principal &amp; Interest</span>
+            <span class="value" id="piPayment">$0</span>
+          </div>
+          <div class="breakdown-item">
+            <span class="name">Property Tax</span>
+            <span class="value" id="taxPayment">$0</span>
+          </div>
+          <div class="breakdown-item">
+            <span class="name">Home Insurance</span>
+            <span class="value" id="insurancePayment">$0</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function fmt(n) {
+      return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function calculate() {
+      const salePrice    = parseFloat(document.getElementById('salePrice').value);
+      const downPayment  = parseFloat(document.getElementById('downPayment').value) || 0;
+      const loanTerm     = parseFloat(document.getElementById('loanTerm').value);
+      const interestRate = parseFloat(document.getElementById('interestRate').value);
+      const propertyTax  = parseFloat(document.getElementById('propertyTax').value) || 0;
+      const insurance    = parseFloat(document.getElementById('insurance').value) || 0;
+
+      const errorEl  = document.getElementById('errorMsg');
+      const resultsEl = document.getElementById('results');
+
+      if (!salePrice || salePrice <= 0 || !loanTerm || loanTerm <= 0 || isNaN(interestRate) || interestRate < 0) {
+        errorEl.style.display = 'block';
+        resultsEl.classList.remove('visible');
+        return;
+      }
+      errorEl.style.display = 'none';
+
+      const principal = salePrice - downPayment;
+      const monthlyRate = interestRate / 100 / 12;
+      const numPayments = loanTerm * 12;
+
+      let pi;
+      if (monthlyRate === 0) {
+        pi = principal / numPayments;
+      } else {
+        pi = principal * (monthlyRate * Math.pow(1 + monthlyRate, numPayments))
+                       / (Math.pow(1 + monthlyRate, numPayments) - 1);
+      }
+
+      const monthlyTax       = propertyTax / 12;
+      const monthlyInsurance = insurance / 12;
+      const total            = pi + monthlyTax + monthlyInsurance;
+
+      document.getElementById('piPayment').textContent        = fmt(pi);
+      document.getElementById('taxPayment').textContent       = fmt(monthlyTax);
+      document.getElementById('insurancePayment').textContent = fmt(monthlyInsurance);
+      document.getElementById('totalPayment').textContent     = fmt(total);
+
+      resultsEl.classList.add('visible');
+    }
+
+    document.querySelectorAll('input').forEach(input => {
+      input.addEventListener('keydown', e => { if (e.key === 'Enter') calculate(); });
+    });
+  </script>
+</body>
+</html>
