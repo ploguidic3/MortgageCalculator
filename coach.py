@@ -10,7 +10,11 @@ import requests
 from dotenv import load_dotenv
 import anthropic
 
-load_dotenv()
+try:
+    load_dotenv()
+except UnicodeDecodeError:
+    # .env was saved as UTF-16 (Windows Notepad default) — retry with correct encoding
+    load_dotenv(encoding="utf-16")
 
 ACCOUNT_ID = int(os.getenv("DOTA_ACCOUNT_ID", "0"))
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
