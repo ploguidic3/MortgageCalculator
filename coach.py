@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import json
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -392,8 +393,8 @@ def generate_report(metrics: dict, trend_context: str | None = None) -> str:
 def analyze_match(match_id: int, conn=None, print_report: bool = True) -> bool:
     """Fetch, parse, analyze a match; save the report and persist metrics.
 
-    Returns True if a report was produced, False if the match was skipped
-    (e.g. our account wasn't in it). Pass `conn` to persist to the DB.
+    Returns the metrics dict if a report was produced, or None if the match
+    was skipped (e.g. our account wasn't in it). Pass `conn` to persist.
     """
     print(f"Fetching match {match_id}...")
     match_data = fetch_match(match_id)
@@ -419,7 +420,7 @@ def analyze_match(match_id: int, conn=None, print_report: bool = True) -> bool:
         metrics = extract_my_metrics(match_data)
     except ValueError as e:
         print(f"Error: {e}")
-        return False
+        return None
 
     # Build the rolling profile from prior games (excluding this one), detect
     # this game's findings, and assemble trend context for the prompt.
@@ -453,7 +454,7 @@ def analyze_match(match_id: int, conn=None, print_report: bool = True) -> bool:
         print(report)
         print("=" * 60)
     print(f"Report saved to {report_path}")
-    return True
+    return metrics
 
 
 def cmd_analyze(args):
@@ -471,51 +472,108 @@ def is_ranked_match(m: dict) -> bool:
             and m.get("game_mode") != db.TURBO_GAME_MODE)
 
 
+def _now() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def desktop_notify(title: str, message: str) -> None:
+    """Best-effort desktop notification; degrades to a terminal banner."""
+    try:
+        from plyer import notification
+        notification.notify(title=title, message=message, app_name="Dota 2 Coach", timeout=10)
+        return
+    except Exception:
+        pass
+    # Fallback: terminal bell + prominent banner (works everywhere).
+    print(f"\a\n*** {title}: {message} ***\n")
+
+
+def find_new_matches(conn, limit: int, include_all: bool):
+    """Return (recent, eligible, new_matches) — new are unseen, oldest-first."""
+    recent = fetch_recent_matches(ACCOUNT_ID, limit=limit)
+    if include_all:
+        eligible = recent
+    else:
+        eligible = [m for m in recent if is_ranked_match(m)]
+    processed = db.get_processed_ids(conn)
+    new_matches = [m for m in eligible if m.get("match_id") not in processed]
+    # recentMatches is newest-first; process oldest-first so the rolling
+    # profile and trend findings accumulate in chronological order.
+    new_matches.reverse()
+    return recent, eligible, new_matches
+
+
+def process_matches(conn, new_matches, notify: bool = False) -> int:
+    """Analyze each new match; optionally fire a desktop notification."""
+    count = 0
+    for i, m in enumerate(new_matches, 1):
+        match_id = m.get("match_id")
+        print(f"\n[{i}/{len(new_matches)}] Processing match {match_id}...")
+        try:
+            metrics = analyze_match(match_id, conn=conn, print_report=False)
+            if metrics:
+                count += 1
+                if notify:
+                    desktop_notify(
+                        "New Dota 2 Coaching Report",
+                        f"{metrics['result']} on {metrics['hero']} "
+                        f"({metrics['role_lane']}) — saved to reports/{match_id}.md",
+                    )
+        except requests.HTTPError as e:
+            print(f"  Skipping {match_id}: HTTP error: {e}")
+        # Be polite to the free API between matches.
+        if i < len(new_matches):
+            time.sleep(2)
+    return count
+
+
 def cmd_check(args):
     conn = db.get_connection(DB_PATH)
     db.init_db(conn)
     try:
         print(f"Fetching recent matches for account {ACCOUNT_ID}...")
-        recent = fetch_recent_matches(ACCOUNT_ID, limit=args.limit)
+        recent, eligible, new_matches = find_new_matches(conn, args.limit, args.include_all)
 
-        if args.include_all:
-            eligible = recent
-        else:
-            eligible = [m for m in recent if is_ranked_match(m)]
-            skipped = len(recent) - len(eligible)
-            if skipped:
-                print(f"Ignoring {skipped} non-ranked/turbo match(es).")
-
-        processed = db.get_processed_ids(conn)
-        new_matches = [m for m in eligible if m.get("match_id") not in processed]
-        # recentMatches is newest-first; process oldest-first so the rolling
-        # profile and trend findings accumulate in chronological order.
-        new_matches.reverse()
-
-        print(f"{len(recent)} recent matches found; "
-              f"{len(eligible)} ranked; {len(processed)} already processed; "
+        skipped = len(recent) - len(eligible)
+        if skipped:
+            print(f"Ignoring {skipped} non-ranked/turbo match(es).")
+        print(f"{len(recent)} recent matches found; {len(eligible)} ranked; "
               f"{len(new_matches)} new.")
 
         if not new_matches:
             print("Nothing new to process. You're up to date.")
             return
 
-        processed_count = 0
-        for i, m in enumerate(new_matches, 1):
-            match_id = m.get("match_id")
-            print(f"\n[{i}/{len(new_matches)}] Processing match {match_id}...")
-            try:
-                produced = analyze_match(match_id, conn=conn, print_report=False)
-                if produced:
-                    processed_count += 1
-            except requests.HTTPError as e:
-                print(f"  Skipping {match_id}: HTTP error: {e}")
-            # Be polite to the free API between matches.
-            if i < len(new_matches):
-                time.sleep(2)
-
-        print(f"\nDone. Processed {processed_count} new match(es). "
+        count = process_matches(conn, new_matches, notify=False)
+        print(f"\nDone. Processed {count} new match(es). "
               f"Total in DB: {db.count_matches(conn)}.")
+    finally:
+        conn.close()
+
+
+def cmd_watch(args):
+    conn = db.get_connection(DB_PATH)
+    db.init_db(conn)
+    interval_secs = max(1, args.interval) * 60
+    notify = not args.no_notify
+    scope = "matches" if args.include_all else "ranked matches"
+    print(f"Watching for new {scope} every {args.interval} min "
+          f"(desktop notifications {'on' if notify else 'off'}). Press Ctrl+C to stop.")
+    try:
+        while True:
+            try:
+                recent, eligible, new_matches = find_new_matches(conn, args.limit, args.include_all)
+                if new_matches:
+                    print(f"\n[{_now()}] {len(new_matches)} new match(es) found.")
+                    count = process_matches(conn, new_matches, notify=notify)
+                    print(f"[{_now()}] Processed {count}. Total in DB: {db.count_matches(conn)}.")
+                else:
+                    print(f"[{_now()}] No new matches. Next check in {args.interval} min.")
+            except requests.RequestException as e:
+                print(f"[{_now()}] Network error: {e}. Will retry next cycle.")
+            time.sleep(interval_secs)
+    except KeyboardInterrupt:
+        print("\nStopped watching. Bye.")
     finally:
         conn.close()
 
@@ -537,6 +595,17 @@ def main():
     check_parser.add_argument("--include-all", action="store_true",
                               help="Process all game modes, not just ranked (includes turbo/unranked)")
     check_parser.set_defaults(func=cmd_check)
+
+    watch_parser = subparsers.add_parser("watch", help="Poll for new matches on an interval and report automatically")
+    watch_parser.add_argument("--interval", type=int, default=5,
+                              help="Minutes between checks (default: 5)")
+    watch_parser.add_argument("--limit", type=int, default=20,
+                              help="How many recent matches to look back over each check (default: 20)")
+    watch_parser.add_argument("--include-all", action="store_true",
+                              help="Process all game modes, not just ranked (includes turbo/unranked)")
+    watch_parser.add_argument("--no-notify", action="store_true",
+                              help="Disable desktop notifications when a new report lands")
+    watch_parser.set_defaults(func=cmd_watch)
 
     args = parser.parse_args()
     args.func(args)

@@ -74,6 +74,23 @@ unranked games are ignored (pass `--include-all` to override). They are also
 excluded from your trend baselines, so turbo's inflated GPM never skews your
 averages.
 
+### Watch automatically
+
+```bash
+python coach.py watch                  # check every 5 minutes
+python coach.py watch --interval 10    # check every 10 minutes
+python coach.py watch --no-notify      # no desktop notifications
+```
+
+Leave this running in a terminal. It polls your recent matches on the chosen
+interval, generates a report for each new ranked game automatically, and pops
+a desktop notification when one lands. Press **Ctrl+C** to stop.
+
+Desktop notifications use [`plyer`](https://pypi.org/project/plyer/) if it's
+installed (it's in `requirements.txt`); if not, you'll get a terminal banner
+and a bell instead. Network hiccups during a cycle are logged and retried on
+the next check rather than crashing the watcher.
+
 ## How it works
 
 - **OpenDota API** (free, no auth) provides match data. A match must be
@@ -128,4 +145,4 @@ note until then).
 - **Milestone 1** ✅ — single-match analysis and reports
 - **Milestone 2** ✅ — SQLite persistence + `check` for new matches
 - **Milestone 3** ✅ — rolling player profile, baselines, and trend-aware feedback
-- **Milestone 4** — `watch` mode that processes new matches automatically
+- **Milestone 4** ✅ — `watch` mode that processes new matches automatically
