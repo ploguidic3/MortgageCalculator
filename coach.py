@@ -22,13 +22,26 @@ OPENDOTA_BASE = "https://api.opendota.com/api"
 
 HERO_NAMES = {}  # populated lazily
 
-ROLES = {
-    1: "Safe Lane (Carry)",
+LANE_NAMES = {
+    0: "Unknown",
+    1: "Safe Lane",
     2: "Mid Lane",
     3: "Off Lane",
-    4: "Soft Support",
-    5: "Hard Support",
+    4: "Jungle",
 }
+
+
+def infer_position(match_data: dict, player: dict, is_radiant: bool) -> int:
+    """Determine P1-P5 by ranking net worth descending within the team."""
+    team = [
+        p for p in match_data.get("players", [])
+        if (p.get("isRadiant", p.get("player_slot", 0) < 128)) == is_radiant
+    ]
+    team.sort(key=lambda p: p.get("net_worth", p.get("total_gold", 0)), reverse=True)
+    for i, p in enumerate(team):
+        if p.get("account_id") == player.get("account_id"):
+            return i + 1
+    return 0
 
 
 def get_hero_name(hero_id: int) -> str:
@@ -101,7 +114,15 @@ def extract_my_metrics(match_data: dict) -> dict:
 
     hero_id = player.get("hero_id", 0)
     hero_name = get_hero_name(hero_id)
-    lane_role = ROLES.get(player.get("lane_role"), "Unknown")
+
+    position = infer_position(match_data, player, is_radiant)
+    lane = player.get("lane", 0)
+    is_roaming = player.get("is_roaming", False)
+    if is_roaming:
+        lane_role = f"Roaming (P{position})"
+    else:
+        lane_name = LANE_NAMES.get(lane, f"Lane {lane}")
+        lane_role = f"{lane_name} — P{position}"
 
     last_hits = player.get("last_hits", 0)
     denies = player.get("denies", 0)
