@@ -111,6 +111,30 @@ def get_hero_name(hero_id: int) -> str:
     return HERO_NAMES.get(hero_id, f"Hero#{hero_id}")
 
 
+# OpenDota per-player benchmark keys -> human labels. Each carries a `pct`
+# (0-1 percentile vs everyone else who played that hero this patch).
+BENCHMARK_LABELS = {
+    "gold_per_min": "GPM",
+    "xp_per_min": "XPM",
+    "last_hits_per_min": "Last hits/min",
+    "hero_damage_per_min": "Hero damage/min",
+    "hero_healing_per_min": "Hero healing/min",
+    "tower_damage": "Tower damage",
+    "stuns_per_min": "Stun duration/min",
+}
+
+
+def extract_benchmarks(player: dict) -> dict:
+    """Pull percentile rankings (0-100) from a parsed player's benchmarks."""
+    raw = player.get("benchmarks") or {}
+    out = {}
+    for key, label in BENCHMARK_LABELS.items():
+        entry = raw.get(key)
+        if isinstance(entry, dict) and entry.get("pct") is not None:
+            out[label] = round(entry["pct"] * 100)
+    return out
+
+
 def fetch_match(match_id: int) -> dict:
     url = f"{OPENDOTA_BASE}/matches/{match_id}"
     r = http_get(url)
@@ -224,6 +248,8 @@ def extract_my_metrics(match_data: dict) -> dict:
     purchase_log = player.get("purchase_log", [])
     first_items = [e.get("key") for e in purchase_log[:6]] if purchase_log else []
 
+    benchmarks = extract_benchmarks(player)
+
     return {
         "match_id": match_data.get("match_id"),
         "result": "WIN" if won else "LOSS",
@@ -255,6 +281,7 @@ def extract_my_metrics(match_data: dict) -> dict:
         "pings": pings,
         "actions_per_min": actions_per_min,
         "first_items": first_items,
+        "benchmarks": benchmarks,
     }
 
 
@@ -279,6 +306,22 @@ def build_prompt(metrics: dict, trend_context: str | None = None) -> str:
         history_block = ""
         trend_instruction = "*(Skipped — insufficient match history for trend analysis.)*"
 
+    benchmarks = m.get("benchmarks") or {}
+    if benchmarks:
+        bench_lines = "\n".join(
+            f"- {label}: {pct}th percentile" for label, pct in benchmarks.items()
+        )
+        benchmark_block = (
+            "\n## Performance Percentiles (vs everyone else on this hero this patch)\n"
+            "These are real percentile rankings from OpenDota. Use THEM — not your own "
+            "intuition — to decide whether farm, damage, and impact were high or low. "
+            "A percentile near 50 is average and is NOT a weakness; only treat something "
+            "below ~30th percentile as a genuine shortfall, or above ~70th as a strength.\n"
+            f"{bench_lines}\n"
+        )
+    else:
+        benchmark_block = ""
+
     return f"""You are an experienced Dota 2 coach reviewing a match replay. Below are the stats from my game. Write a coaching report in clean markdown.
 
 CRITICAL RULES — follow these exactly or the report is useless:
@@ -286,6 +329,9 @@ CRITICAL RULES — follow these exactly or the report is useless:
 2. Do not state that an ability is channeled, instant-cast, AoE, single-target, or deals a specific damage type unless you are 100% certain — hero kits change between patches and mistakes destroy credibility.
 3. Do not assume that a given ability contributes to "hero damage" unless you know it deals direct hero damage. Disables, transforms, and debuffs do not appear in hero damage stats.
 4. Tie every coaching point to a specific number from the data.
+5. Do NOT judge a stat as "too high" or "too low" in absolute terms. For benchmarked stats use the percentiles below; for everything else use the player's own historical baseline. An average or above-average stat is never a weakness.
+6. Deaths and KDA have NO universal benchmark and depend heavily on role and game length. Do NOT apply absolute death thresholds. For a support in a 35+ minute game, 6–9 deaths is normal and not a problem by itself — especially in a win. Only flag deaths if they are clearly above this player's own baseline (see history) or extreme for the game's length. Supports trade their lives to save cores; that is their job.
+7. This player is high-MMR ranked. Calibrate to that — do not give beginner-level advice or treat normal high-level trades as mistakes.
 
 ## Match Summary
 - Match ID: {m['match_id']}
@@ -307,7 +353,7 @@ CRITICAL RULES — follow these exactly or the report is useless:
 - Actions per Minute: {m['actions_per_min']}
 - Pings: {m['pings']}
 - Early items purchased: {', '.join(m['first_items']) if m['first_items'] else 'unknown'}
-{history_block}
+{benchmark_block}{history_block}
 ---
 
 Write a coaching report with these exact sections:
@@ -318,10 +364,10 @@ Write a coaching report with these exact sections:
 One short paragraph summarizing the game: result, hero, role, key numbers.
 
 ## Top 3 Things to Improve
-For each point: name the issue, tie it to a specific stat from the data above, and give one concrete action to fix it next game. Be direct and specific — not generic advice.
+For each point: name the issue, tie it to a specific stat from the data above, and give one concrete action to fix it next game. Be direct and specific — not generic advice. Only call something a weakness if a percentile is genuinely low (below ~30th) or it is clearly below this player's own baseline — do not manufacture problems from average stats. If there are fewer than three genuine issues, give fewer; do not pad.
 
 ## What You Did Well
-1–2 bullet points on genuine strengths from the data (skip if the game was terrible; don't invent positives).
+1–2 bullet points on genuine strengths from the data — prefer stats at or above the ~70th percentile, or improvements over the player's baseline (skip if the game was genuinely poor; don't invent positives).
 
 ## Focus for Next Game
 One single, actionable sentence. The single most impactful thing to work on.

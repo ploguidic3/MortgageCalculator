@@ -83,6 +83,12 @@ averages.
 - A clean metrics summary — not raw JSON — is sent to Claude
   (`claude-sonnet-4-6`) with guardrails against inventing hero ability
   mechanics.
+- Real **percentile benchmarks** from OpenDota (your GPM, XPM, last hits,
+  damage, etc. vs everyone else on that hero this patch) are included so
+  the coach judges stats against actual data instead of guessing absolute
+  thresholds. Deaths/KDA are judged relative to role, game length, and your
+  own baseline — a support dying several times in a long game isn't flagged
+  as a mistake.
 - Processed matches are stored in `coach.db` (SQLite) so `check` is
   incremental.
 
