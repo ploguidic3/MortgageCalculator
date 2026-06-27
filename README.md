@@ -91,6 +91,27 @@ installed (it's in `requirements.txt`); if not, you'll get a terminal banner
 and a bell instead. Network hiccups during a cycle are logged and retried on
 the next check rather than crashing the watcher.
 
+### Launch automatically with Dota 2 (Windows)
+
+There's a `start-coach.bat` helper in this folder. Double-clicking it starts
+the watcher. To have it start whenever you open Dota 2:
+
+1. In Steam, right-click **Dota 2 → Properties → General → Launch Options**.
+2. Paste this (adjust the path to where `start-coach.bat` actually lives):
+
+   ```
+   cmd /c start "Dota Coach" /min "C:\Users\plogu\MortgageCalculator\MortgageCalculator\start-coach.bat" & %command%
+   ```
+
+   `%command%` is Steam's placeholder for the game itself. This opens the
+   watcher in its own minimized window, then launches Dota normally.
+
+Notes:
+- The watcher keeps running after you quit Dota (and you can close its window
+  any time to stop it) — it's a separate process, not tied to the game.
+- If you'd rather not touch Steam, just double-click `start-coach.bat` before
+  you start playing. Same result, less fiddling.
+
 ## How it works
 
 - **OpenDota API** (free, no auth) provides match data. A match must be
