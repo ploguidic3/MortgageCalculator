@@ -10,6 +10,8 @@ import requests
 from dotenv import load_dotenv
 import anthropic
 
+import db
+
 try:
     load_dotenv()
 except UnicodeDecodeError:
@@ -19,6 +21,7 @@ except UnicodeDecodeError:
 ACCOUNT_ID = int(os.getenv("DOTA_ACCOUNT_ID", "0"))
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENDOTA_BASE = "https://api.opendota.com/api"
+DB_PATH = os.getenv("COACH_DB", "coach.db")
 
 HERO_NAMES = {}  # populated lazily
 
@@ -74,12 +77,32 @@ def infer_position(match_data: dict, player: dict, is_radiant: bool) -> int:
     return 0
 
 
+def http_get(url: str, params: dict | None = None, timeout: int = 15, retries: int = 3):
+    """GET with polite retry on rate limits (429) and transient 5xx errors."""
+    backoff = 2
+    for attempt in range(retries + 1):
+        r = requests.get(url, params=params, timeout=timeout)
+        if r.status_code == 429 or 500 <= r.status_code < 600:
+            if attempt < retries:
+                wait = backoff
+                retry_after = r.headers.get("Retry-After")
+                if retry_after and retry_after.isdigit():
+                    wait = int(retry_after)
+                print(f"  API returned {r.status_code}; retrying in {wait}s...")
+                time.sleep(wait)
+                backoff *= 2
+                continue
+        r.raise_for_status()
+        return r
+    r.raise_for_status()
+    return r
+
+
 def get_hero_name(hero_id: int) -> str:
     global HERO_NAMES
     if not HERO_NAMES:
         try:
-            r = requests.get("https://api.opendota.com/api/heroes", timeout=10)
-            r.raise_for_status()
+            r = http_get("https://api.opendota.com/api/heroes", timeout=10)
             for h in r.json():
                 HERO_NAMES[h["id"]] = h["localized_name"]
         except Exception:
@@ -89,9 +112,15 @@ def get_hero_name(hero_id: int) -> str:
 
 def fetch_match(match_id: int) -> dict:
     url = f"{OPENDOTA_BASE}/matches/{match_id}"
-    r = requests.get(url, timeout=15)
-    r.raise_for_status()
+    r = http_get(url)
     return r.json()
+
+
+def fetch_recent_matches(account_id: int, limit: int = 20) -> list:
+    url = f"{OPENDOTA_BASE}/players/{account_id}/recentMatches"
+    r = http_get(url)
+    matches = r.json() or []
+    return matches[:limit] if limit else matches
 
 
 def request_parse(match_id: int) -> str | None:
@@ -286,7 +315,12 @@ def generate_report(metrics: dict) -> str:
     return response.content[0].text
 
 
-def analyze_match(match_id: int) -> None:
+def analyze_match(match_id: int, conn=None, print_report: bool = True) -> bool:
+    """Fetch, parse, analyze a match; save the report and persist metrics.
+
+    Returns True if a report was produced, False if the match was skipped
+    (e.g. our account wasn't in it). Pass `conn` to persist to the DB.
+    """
     print(f"Fetching match {match_id}...")
     match_data = fetch_match(match_id)
 
@@ -311,9 +345,9 @@ def analyze_match(match_id: int) -> None:
         metrics = extract_my_metrics(match_data)
     except ValueError as e:
         print(f"Error: {e}")
-        sys.exit(1)
+        return False
 
-    print(f"Generating coaching report with Claude (claude-sonnet-4-6)...")
+    print("Generating coaching report with Claude (claude-sonnet-4-6)...")
     report = generate_report(metrics)
 
     reports_dir = Path("reports")
@@ -321,14 +355,60 @@ def analyze_match(match_id: int) -> None:
     report_path = reports_dir / f"{match_id}.md"
     report_path.write_text(report, encoding="utf-8")
 
-    print("\n" + "=" * 60)
-    print(report)
-    print("=" * 60)
-    print(f"\nReport saved to {report_path}")
+    if conn is not None:
+        db.save_match(conn, metrics)
+
+    if print_report:
+        print("\n" + "=" * 60)
+        print(report)
+        print("=" * 60)
+    print(f"Report saved to {report_path}")
+    return True
 
 
 def cmd_analyze(args):
-    analyze_match(args.match_id)
+    conn = db.get_connection(DB_PATH)
+    db.init_db(conn)
+    try:
+        analyze_match(args.match_id, conn=conn)
+    finally:
+        conn.close()
+
+
+def cmd_check(args):
+    conn = db.get_connection(DB_PATH)
+    db.init_db(conn)
+    try:
+        print(f"Fetching recent matches for account {ACCOUNT_ID}...")
+        recent = fetch_recent_matches(ACCOUNT_ID, limit=args.limit)
+        processed = db.get_processed_ids(conn)
+        new_matches = [m for m in recent if m.get("match_id") not in processed]
+
+        print(f"{len(recent)} recent matches found; "
+              f"{len(processed)} already processed; {len(new_matches)} new.")
+
+        if not new_matches:
+            print("Nothing new to process. You're up to date.")
+            return
+
+        processed_count = 0
+        for i, m in enumerate(new_matches, 1):
+            match_id = m.get("match_id")
+            print(f"\n[{i}/{len(new_matches)}] Processing match {match_id}...")
+            try:
+                produced = analyze_match(match_id, conn=conn, print_report=False)
+                if produced:
+                    processed_count += 1
+            except requests.HTTPError as e:
+                print(f"  Skipping {match_id}: HTTP error: {e}")
+            # Be polite to the free API between matches.
+            if i < len(new_matches):
+                time.sleep(2)
+
+        print(f"\nDone. Processed {processed_count} new match(es). "
+              f"Total in DB: {db.count_matches(conn)}.")
+    finally:
+        conn.close()
 
 
 def main():
@@ -338,9 +418,14 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    analyze_parser = subparsers.add_parser("analyze", help="Analyze a match and generate a coaching report")
+    analyze_parser = subparsers.add_parser("analyze", help="Analyze a single match and generate a coaching report")
     analyze_parser.add_argument("match_id", type=int, help="OpenDota match ID")
     analyze_parser.set_defaults(func=cmd_analyze)
+
+    check_parser = subparsers.add_parser("check", help="Process any recent matches not yet in the database")
+    check_parser.add_argument("--limit", type=int, default=20,
+                              help="How many recent matches to look back over (default: 20)")
+    check_parser.set_defaults(func=cmd_check)
 
     args = parser.parse_args()
     args.func(args)

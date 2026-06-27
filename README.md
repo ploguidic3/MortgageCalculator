@@ -1,0 +1,98 @@
+# Dota 2 Automated Post-Match Coaching Reports
+
+A command-line tool that pulls your finished Dota 2 matches from OpenDota,
+analyzes your play from the parsed replay data, and writes a prioritized
+coaching report using Claude. It remembers the matches it has already
+processed so it never reports on the same game twice.
+
+## Requirements
+
+- Python 3.11+
+- An [Anthropic API key](https://console.anthropic.com)
+- Your OpenDota account ID (the number in your
+  `https://www.opendota.com/players/<id>` URL)
+
+## ⚠️ Enable public match data first
+
+OpenDota can only see your matches if you have **Expose Public Match Data**
+turned on in Dota 2:
+
+> Dota 2 → Settings → Options → Advanced → **Expose Public Match Data** ✅
+
+Without this, OpenDota will have no record of your games and the tool will
+find nothing to analyze. This only affects matches played *after* you enable it.
+
+## Setup
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Create your .env from the template
+cp .env.example .env
+```
+
+Then edit `.env` and fill in your values:
+
+```
+DOTA_ACCOUNT_ID=20013127
+ANTHROPIC_API_KEY=sk-ant-api03-...
+```
+
+> **Windows note:** save `.env` as UTF-8, not UTF-16. If you use Notepad,
+> choose "UTF-8" in the encoding dropdown of the Save dialog (the tool also
+> tries to recover from a UTF-16 file automatically).
+
+Your `.env` is gitignored and will never be committed.
+
+## Usage
+
+### Analyze a single match
+
+```bash
+python coach.py analyze <match_id>
+```
+
+Fetches the match, requests a parse if it isn't parsed yet (this can take a
+minute — progress is shown), extracts your stats, generates a coaching
+report, prints it, and saves it to `reports/<match_id>.md`.
+
+### Check for new matches
+
+```bash
+python coach.py check            # looks at your 20 most recent matches
+python coach.py check --limit 5  # only the 5 most recent
+```
+
+Pulls your recent matches, processes any not already in the local database
+(`coach.db`), and skips the ones it has seen before. Running it twice in a
+row only processes each match once.
+
+## How it works
+
+- **OpenDota API** (free, no auth) provides match data. A match must be
+  *parsed* (`version` field non-null) for full stats; the tool triggers a
+  parse and polls until it's ready.
+- Your stats are matched out of the match's `players[]` array by account ID.
+- A clean metrics summary — not raw JSON — is sent to Claude
+  (`claude-sonnet-4-6`) with guardrails against inventing hero ability
+  mechanics.
+- Processed matches are stored in `coach.db` (SQLite) so `check` is
+  incremental.
+
+## Files
+
+| File              | Purpose                                            |
+| ----------------- | -------------------------------------------------- |
+| `coach.py`        | CLI entry point and analysis flow                  |
+| `db.py`           | SQLite persistence for processed matches           |
+| `reports/`        | Generated markdown reports (one per match)         |
+| `coach.db`        | Local match database (gitignored, created on first run) |
+| `.env`            | Your secrets (gitignored)                          |
+
+## Roadmap
+
+- **Milestone 1** ✅ — single-match analysis and reports
+- **Milestone 2** ✅ — SQLite persistence + `check` for new matches
+- **Milestone 3** — rolling player profile, baselines, and trend-aware feedback
+- **Milestone 4** — `watch` mode that processes new matches automatically
