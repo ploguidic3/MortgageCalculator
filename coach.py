@@ -32,14 +32,44 @@ LANE_NAMES = {
 
 
 def infer_position(match_data: dict, player: dict, is_radiant: bool) -> int:
-    """Determine P1-P5 by ranking net worth descending within the team."""
+    """Determine P1-P5 using lane + net worth.
+
+    Position number is tied to lane, not just farm:
+      P1 carry / P5 hard support  -> safe lane (P1 richer, P5 poorer)
+      P2 mid                      -> mid lane
+      P3 offlane / P4 soft support-> off lane (P3 richer, P4 poorer)
+    Falls back to pure net-worth rank when lane data is missing/ambiguous.
+    """
     team = [
         p for p in match_data.get("players", [])
         if (p.get("isRadiant", p.get("player_slot", 0) < 128)) == is_radiant
     ]
-    team.sort(key=lambda p: p.get("net_worth", p.get("total_gold", 0)), reverse=True)
-    for i, p in enumerate(team):
-        if p.get("account_id") == player.get("account_id"):
+
+    def nw(p):
+        return p.get("net_worth", p.get("total_gold", 0))
+
+    slot = player.get("player_slot")
+    lane = player.get("lane")
+    roaming = player.get("is_roaming", False)
+
+    # Lane-aware assignment (lane: 1=safe, 2=mid, 3=off, normalized per team)
+    if not roaming and lane in (1, 2, 3):
+        same_lane = sorted(
+            [p for p in team if p.get("lane") == lane and not p.get("is_roaming", False)],
+            key=nw, reverse=True,
+        )
+        idx = next((i for i, p in enumerate(same_lane) if p.get("player_slot") == slot), 0)
+        if lane == 2:
+            return 2
+        if lane == 1:
+            return 1 if idx == 0 else 5
+        if lane == 3:
+            return 3 if idx == 0 else 4
+
+    # Fallback: rank by net worth descending within the team
+    by_nw = sorted(team, key=nw, reverse=True)
+    for i, p in enumerate(by_nw):
+        if p.get("player_slot") == slot:
             return i + 1
     return 0
 
