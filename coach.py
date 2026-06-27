@@ -194,6 +194,12 @@ def build_prompt(metrics: dict) -> str:
     m = metrics
     return f"""You are an experienced Dota 2 coach reviewing a match replay. Below are the stats from my game. Write a coaching report in clean markdown.
 
+CRITICAL RULES — follow these exactly or the report is useless:
+1. Base every claim on the stats provided. Do not invent or assume ability mechanics, cooldowns, or damage types. If you mention an ability by name, describe only what the numbers imply, not how the ability works mechanically.
+2. Do not state that an ability is channeled, instant-cast, AoE, single-target, or deals a specific damage type unless you are 100% certain — hero kits change between patches and mistakes destroy credibility.
+3. Do not assume that a given ability contributes to "hero damage" unless you know it deals direct hero damage. Disables, transforms, and debuffs do not appear in hero damage stats.
+4. Tie every coaching point to a specific number from the data.
+
 ## Match Summary
 - Match ID: {m['match_id']}
 - Result: {m['result']}
