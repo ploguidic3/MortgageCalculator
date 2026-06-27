@@ -60,13 +60,19 @@ report, prints it, and saves it to `reports/<match_id>.md`.
 ### Check for new matches
 
 ```bash
-python coach.py check            # looks at your 20 most recent matches
-python coach.py check --limit 5  # only the 5 most recent
+python coach.py check                # ranked games from your 20 most recent
+python coach.py check --limit 5      # only the 5 most recent
+python coach.py check --include-all  # don't skip turbo/unranked
 ```
 
 Pulls your recent matches, processes any not already in the local database
 (`coach.db`), and skips the ones it has seen before. Running it twice in a
 row only processes each match once.
+
+**Only ranked matchmaking games are processed by default** — turbo and
+unranked games are ignored (pass `--include-all` to override). They are also
+excluded from your trend baselines, so turbo's inflated GPM never skews your
+averages.
 
 ## How it works
 
@@ -87,6 +93,12 @@ play: role-aware baselines (deaths, KDA, GPM/XPM, CS@10, ward counts, etc.)
 computed from your recent games. Each report compares the current game to
 your own averages, and the **Trend Note** section calls out recurring issues
 and whether you improved on them.
+
+Role-sensitive stats (GPM, XPM, CS@10, last hits, wards) are compared **only
+against your games in the same position** — your P1 carry's farm is never
+averaged against your P5 support's. Role-neutral stats (deaths, KDA,
+teamfight %) may fall back to an all-roles baseline when same-role history is
+still thin.
 
 Under the hood, each game's notable deviations from your baseline are logged
 to a `findings` table, so later reports can say things like *"High deaths:

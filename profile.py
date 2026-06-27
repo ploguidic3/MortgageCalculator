@@ -36,6 +36,15 @@ FINDING_DEFS = [
     ("low_sen", "sen_placed", "support", "Few sentry wards", 0.70),
 ]
 
+# Metrics whose meaning depends heavily on role — a P1 carry and a P5 support
+# have wildly different GPM, farm, and ward numbers. These are ONLY ever
+# compared against same-role games; we never mix roles for them. Everything
+# else (deaths, KDA, teamfight %) may fall back to an all-roles baseline.
+ROLE_SENSITIVE = {
+    "gpm", "xpm", "last_hits", "lh_per_min", "cs_at_10",
+    "hero_damage", "tower_damage", "obs_placed", "sen_placed",
+}
+
 # Minimum prior games before we trust a baseline enough to flag findings.
 MIN_HISTORY = 3
 # Window sizes.
@@ -67,39 +76,53 @@ def _avg(values):
 
 
 def compute_profile(matches: list, position=None) -> dict:
-    """Build baselines from history.
+    """Build per-metric baselines from history.
 
-    If `position` is given and there are enough same-role games, baselines are
-    role-specific; otherwise they fall back to all games. Most recent games
-    (by list order — callers pass oldest-first) are weighted by windowing.
+    Each metric's baseline is computed independently:
+      * Role-sensitive metrics (GPM, farm, wards, ...) use ONLY same-role games
+        and have no baseline until there are enough of them — they are never
+        averaged across roles.
+      * Role-neutral metrics (deaths, KDA, teamfight %) prefer a same-role
+        baseline but fall back to an all-roles baseline when role history is thin.
+    Callers pass matches oldest-first; the most recent BASELINE_WINDOW are used.
     """
-    role_matches = [m for m in matches if m.get("position") == position] if position else []
-    if position is not None and len(role_matches) >= MIN_HISTORY:
-        scope_matches = role_matches
-        scope = "role"
-    else:
-        scope_matches = matches
-        scope = "overall"
+    role_matches = [m for m in matches if m.get("position") == position] if position is not None else []
+    role_window = role_matches[-BASELINE_WINDOW:]
+    overall_window = matches[-BASELINE_WINDOW:]
 
-    window = scope_matches[-BASELINE_WINDOW:]
-    baseline = {
-        metric: _avg([m.get(metric) for m in window])
-        for metric in METRIC_DIRECTION
-    }
+    baseline = {}
+    source = {}
+    for metric in METRIC_DIRECTION:
+        role_avg = _avg([m.get(metric) for m in role_window]) if len(role_window) >= MIN_HISTORY else None
+        if metric in ROLE_SENSITIVE:
+            baseline[metric] = role_avg
+            source[metric] = "role" if role_avg is not None else None
+        elif role_avg is not None:
+            baseline[metric] = role_avg
+            source[metric] = "role"
+        else:
+            overall_avg = _avg([m.get(metric) for m in overall_window]) if len(overall_window) >= MIN_HISTORY else None
+            baseline[metric] = overall_avg
+            source[metric] = "overall" if overall_avg is not None else None
 
     return {
         "baseline": baseline,
-        "baseline_scope": scope,
+        "baseline_source": source,
         "n_total": len(matches),
         "n_role": len(role_matches),
-        "n_window": len(window),
+        "n_role_window": len(role_window),
+        "n_window": len(overall_window),
         "position": position,
     }
 
 
 def detect_findings(metrics: dict, profile: dict) -> list:
-    """Compare a single match's metrics against the baseline and flag issues."""
-    if profile["n_window"] < MIN_HISTORY:
+    """Compare a single match's metrics against the baseline and flag issues.
+
+    A finding only fires when that metric actually has a baseline, so
+    role-sensitive metrics are never flagged without same-role history.
+    """
+    if profile["n_total"] < MIN_HISTORY:
         return []
 
     baseline = profile["baseline"]
@@ -146,13 +169,15 @@ def build_trend_context(metrics: dict, profile: dict, current_findings: list,
         return None
 
     baseline = profile["baseline"]
+    source = profile["baseline_source"]
     position = metrics.get("position")
-    scope_label = (f"as P{position}" if profile["baseline_scope"] == "role" and position
-                   else "across all roles")
+    role_note = f", {profile['n_role']} as P{position}" if position else ""
 
     lines = [
-        f"PLAYER HISTORY — baselines from your last {profile['n_window']} games "
-        f"({scope_label}); {profile['n_total']} games tracked total:",
+        f"PLAYER HISTORY — {profile['n_total']} games tracked{role_note}.",
+        "Role-sensitive stats (GPM, XPM, CS@10, last hits, wards) are compared "
+        "ONLY against your games in the same role; role-neutral stats (deaths, "
+        "KDA, teamfight %) may use all roles.",
     ]
 
     # Show the headline metrics this game vs the player's own average.
@@ -167,13 +192,14 @@ def build_trend_context(metrics: dict, profile: dict, current_findings: list,
         value = metrics.get(metric)
         if base is None or value is None:
             continue
+        scope_txt = f"P{position} avg" if source.get(metric) == "role" and position else "overall avg"
         direction = METRIC_DIRECTION[metric]
         if direction == "lower":
             verdict = "better" if value < base else ("worse" if value > base else "on par")
         else:
             verdict = "better" if value > base else ("worse" if value < base else "on par")
         lines.append(
-            f"- {metric}: this game {_fmt(value)} vs your avg {_fmt(base)} ({verdict})"
+            f"- {metric}: this game {_fmt(value)} vs your {scope_txt} {_fmt(base)} ({verdict})"
         )
 
     # Recurring issues across recent games.

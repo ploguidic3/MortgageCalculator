@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS matches (
     teamfight_participation REAL,
     pings                   INTEGER,
     actions_per_min         INTEGER,
+    lobby_type              INTEGER,
+    game_mode               INTEGER,
     metrics_json            TEXT
 );
 
@@ -64,7 +66,8 @@ _COLUMN_KEYS = [
     "deaths", "assists", "kda", "gpm", "xpm", "last_hits", "denies",
     "lh_per_min", "cs_at_10", "hero_damage", "tower_damage", "hero_healing",
     "net_worth", "obs_placed", "sen_placed", "camps_stacked", "courier_kills",
-    "teamfight_participation", "pings", "actions_per_min",
+    "teamfight_participation", "pings", "actions_per_min", "lobby_type",
+    "game_mode",
 ]
 
 # Columns added after the original Milestone 2 schema; applied to pre-existing
@@ -72,7 +75,12 @@ _COLUMN_KEYS = [
 _MIGRATION_COLUMNS = {
     "position": "INTEGER",
     "cs_at_10": "INTEGER",
+    "lobby_type": "INTEGER",
+    "game_mode": "INTEGER",
 }
+
+RANKED_LOBBY_TYPE = 7
+TURBO_GAME_MODE = 23
 
 
 def get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
@@ -128,9 +136,24 @@ def count_matches(conn: sqlite3.Connection) -> int:
     return cur.fetchone()["n"]
 
 
-def get_matches(conn: sqlite3.Connection, exclude_match_id: int | None = None) -> list:
-    """Return all stored matches as plain dicts, oldest processed first."""
-    cur = conn.execute("SELECT * FROM matches ORDER BY processed_at ASC")
+def get_matches(conn: sqlite3.Connection, exclude_match_id: int | None = None,
+                ranked_only: bool = True) -> list:
+    """Return stored matches as plain dicts, oldest processed first.
+
+    With ranked_only (the default), turbo and known non-ranked games are
+    excluded from trend history. Rows predating lobby/mode tracking have NULL
+    values and are kept, so existing history isn't lost.
+    """
+    if ranked_only:
+        cur = conn.execute(
+            """SELECT * FROM matches
+               WHERE (lobby_type = ? OR lobby_type IS NULL)
+                 AND (game_mode != ? OR game_mode IS NULL)
+               ORDER BY processed_at ASC""",
+            (RANKED_LOBBY_TYPE, TURBO_GAME_MODE),
+        )
+    else:
+        cur = conn.execute("SELECT * FROM matches ORDER BY processed_at ASC")
     rows = [dict(r) for r in cur.fetchall()]
     if exclude_match_id is not None:
         rows = [r for r in rows if r.get("match_id") != exclude_match_id]

@@ -231,6 +231,8 @@ def extract_my_metrics(match_data: dict) -> dict:
         "role_lane": lane_role,
         "position": position,
         "cs_at_10": cs_at_10,
+        "lobby_type": match_data.get("lobby_type"),
+        "game_mode": match_data.get("game_mode"),
         "duration_min": round(duration_min, 1),
         "kills": kills,
         "deaths": deaths,
@@ -417,20 +419,36 @@ def cmd_analyze(args):
         conn.close()
 
 
+def is_ranked_match(m: dict) -> bool:
+    """True only for ranked matchmaking games (lobby_type 7), excluding turbo."""
+    return (m.get("lobby_type") == db.RANKED_LOBBY_TYPE
+            and m.get("game_mode") != db.TURBO_GAME_MODE)
+
+
 def cmd_check(args):
     conn = db.get_connection(DB_PATH)
     db.init_db(conn)
     try:
         print(f"Fetching recent matches for account {ACCOUNT_ID}...")
         recent = fetch_recent_matches(ACCOUNT_ID, limit=args.limit)
+
+        if args.include_all:
+            eligible = recent
+        else:
+            eligible = [m for m in recent if is_ranked_match(m)]
+            skipped = len(recent) - len(eligible)
+            if skipped:
+                print(f"Ignoring {skipped} non-ranked/turbo match(es).")
+
         processed = db.get_processed_ids(conn)
-        new_matches = [m for m in recent if m.get("match_id") not in processed]
+        new_matches = [m for m in eligible if m.get("match_id") not in processed]
         # recentMatches is newest-first; process oldest-first so the rolling
         # profile and trend findings accumulate in chronological order.
         new_matches.reverse()
 
         print(f"{len(recent)} recent matches found; "
-              f"{len(processed)} already processed; {len(new_matches)} new.")
+              f"{len(eligible)} ranked; {len(processed)} already processed; "
+              f"{len(new_matches)} new.")
 
         if not new_matches:
             print("Nothing new to process. You're up to date.")
@@ -467,9 +485,11 @@ def main():
     analyze_parser.add_argument("match_id", type=int, help="OpenDota match ID")
     analyze_parser.set_defaults(func=cmd_analyze)
 
-    check_parser = subparsers.add_parser("check", help="Process any recent matches not yet in the database")
+    check_parser = subparsers.add_parser("check", help="Process any recent ranked matches not yet in the database")
     check_parser.add_argument("--limit", type=int, default=20,
                               help="How many recent matches to look back over (default: 20)")
+    check_parser.add_argument("--include-all", action="store_true",
+                              help="Process all game modes, not just ranked (includes turbo/unranked)")
     check_parser.set_defaults(func=cmd_check)
 
     args = parser.parse_args()
