@@ -80,12 +80,27 @@ row only processes each match once.
 - Processed matches are stored in `coach.db` (SQLite) so `check` is
   incremental.
 
+## Memory & trends
+
+As you process more matches, the tool builds a **rolling profile** of your
+play: role-aware baselines (deaths, KDA, GPM/XPM, CS@10, ward counts, etc.)
+computed from your recent games. Each report compares the current game to
+your own averages, and the **Trend Note** section calls out recurring issues
+and whether you improved on them.
+
+Under the hood, each game's notable deviations from your baseline are logged
+to a `findings` table, so later reports can say things like *"High deaths:
+flagged in 3 recent games; not flagged this game — improvement."* You need a
+few games in the database before trends appear (it falls back to a no-history
+note until then).
+
 ## Files
 
 | File              | Purpose                                            |
 | ----------------- | -------------------------------------------------- |
 | `coach.py`        | CLI entry point and analysis flow                  |
-| `db.py`           | SQLite persistence for processed matches           |
+| `db.py`           | SQLite persistence for matches and findings        |
+| `profile.py`      | Rolling baselines, finding detection, trend context|
 | `reports/`        | Generated markdown reports (one per match)         |
 | `coach.db`        | Local match database (gitignored, created on first run) |
 | `.env`            | Your secrets (gitignored)                          |
@@ -94,5 +109,5 @@ row only processes each match once.
 
 - **Milestone 1** ✅ — single-match analysis and reports
 - **Milestone 2** ✅ — SQLite persistence + `check` for new matches
-- **Milestone 3** — rolling player profile, baselines, and trend-aware feedback
+- **Milestone 3** ✅ — rolling player profile, baselines, and trend-aware feedback
 - **Milestone 4** — `watch` mode that processes new matches automatically

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS matches (
     result                  TEXT,
     hero                    TEXT,
     role_lane               TEXT,
+    position                INTEGER,
     duration_min            REAL,
     kills                   INTEGER,
     deaths                  INTEGER,
@@ -29,6 +30,7 @@ CREATE TABLE IF NOT EXISTS matches (
     last_hits               INTEGER,
     denies                  INTEGER,
     lh_per_min              REAL,
+    cs_at_10                INTEGER,
     hero_damage             INTEGER,
     tower_damage            INTEGER,
     hero_healing            INTEGER,
@@ -42,16 +44,35 @@ CREATE TABLE IF NOT EXISTS matches (
     actions_per_min         INTEGER,
     metrics_json            TEXT
 );
+
+CREATE TABLE IF NOT EXISTS findings (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id     INTEGER NOT NULL,
+    finding_key  TEXT    NOT NULL,
+    label        TEXT,
+    metric       TEXT,
+    metric_value REAL,
+    baseline     REAL,
+    created_at   TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_findings_match ON findings(match_id);
 """
 
 # Metric keys persisted as their own columns (order is not significant).
 _COLUMN_KEYS = [
-    "result", "hero", "role_lane", "duration_min", "kills", "deaths",
-    "assists", "kda", "gpm", "xpm", "last_hits", "denies", "lh_per_min",
-    "hero_damage", "tower_damage", "hero_healing", "net_worth", "obs_placed",
-    "sen_placed", "camps_stacked", "courier_kills", "teamfight_participation",
-    "pings", "actions_per_min",
+    "result", "hero", "role_lane", "position", "duration_min", "kills",
+    "deaths", "assists", "kda", "gpm", "xpm", "last_hits", "denies",
+    "lh_per_min", "cs_at_10", "hero_damage", "tower_damage", "hero_healing",
+    "net_worth", "obs_placed", "sen_placed", "camps_stacked", "courier_kills",
+    "teamfight_participation", "pings", "actions_per_min",
 ]
+
+# Columns added after the original Milestone 2 schema; applied to pre-existing
+# databases via ALTER TABLE so old coach.db files keep working.
+_MIGRATION_COLUMNS = {
+    "position": "INTEGER",
+    "cs_at_10": "INTEGER",
+}
 
 
 def get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
@@ -62,7 +83,15 @@ def get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(matches)")}
+    for col, decl in _MIGRATION_COLUMNS.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE matches ADD COLUMN {col} {decl}")
 
 
 def match_exists(conn: sqlite3.Connection, match_id: int) -> bool:
@@ -97,3 +126,52 @@ def save_match(conn: sqlite3.Connection, metrics: dict) -> None:
 def count_matches(conn: sqlite3.Connection) -> int:
     cur = conn.execute("SELECT COUNT(*) AS n FROM matches")
     return cur.fetchone()["n"]
+
+
+def get_matches(conn: sqlite3.Connection, exclude_match_id: int | None = None) -> list:
+    """Return all stored matches as plain dicts, oldest processed first."""
+    cur = conn.execute("SELECT * FROM matches ORDER BY processed_at ASC")
+    rows = [dict(r) for r in cur.fetchall()]
+    if exclude_match_id is not None:
+        rows = [r for r in rows if r.get("match_id") != exclude_match_id]
+    return rows
+
+
+def save_findings(conn: sqlite3.Connection, match_id: int, findings: list) -> None:
+    """Replace the logged findings for a match (idempotent re-processing)."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("DELETE FROM findings WHERE match_id = ?", (match_id,))
+    conn.executemany(
+        """INSERT INTO findings
+           (match_id, finding_key, label, metric, metric_value, baseline, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        [
+            (match_id, f.get("key"), f.get("label"), f.get("metric"),
+             f.get("value"), f.get("baseline"), now)
+            for f in findings
+        ],
+    )
+    conn.commit()
+
+
+def get_recent_findings(conn: sqlite3.Connection, match_limit: int = 5) -> list:
+    """Findings logged for the most recently processed matches.
+
+    Returns a list of dicts including each finding's match_id, so callers can
+    count how many distinct recent games each issue appeared in.
+    """
+    recent_ids = [
+        row["match_id"]
+        for row in conn.execute(
+            "SELECT match_id FROM matches ORDER BY processed_at DESC LIMIT ?",
+            (match_limit,),
+        )
+    ]
+    if not recent_ids:
+        return []
+    placeholders = ", ".join("?" for _ in recent_ids)
+    cur = conn.execute(
+        f"SELECT * FROM findings WHERE match_id IN ({placeholders})",
+        recent_ids,
+    )
+    return [dict(r) for r in cur.fetchall()]

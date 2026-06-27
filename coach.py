@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import anthropic
 
 import db
+import profile as player_profile
 
 try:
     load_dotenv()
@@ -187,6 +188,10 @@ def extract_my_metrics(match_data: dict) -> dict:
     denies = player.get("denies", 0)
     lh_per_min = last_hits / max(duration_min, 1)
 
+    # CS@10 from the per-minute cumulative last-hit series (parsed matches only).
+    lh_t = player.get("lh_t") or []
+    cs_at_10 = lh_t[10] if len(lh_t) > 10 else None
+
     gpm = player.get("gold_per_min", 0)
     xpm = player.get("xp_per_min", 0)
     hero_damage = player.get("hero_damage", 0)
@@ -224,6 +229,8 @@ def extract_my_metrics(match_data: dict) -> dict:
         "result": "WIN" if won else "LOSS",
         "hero": hero_name,
         "role_lane": lane_role,
+        "position": position,
+        "cs_at_10": cs_at_10,
         "duration_min": round(duration_min, 1),
         "kills": kills,
         "deaths": deaths,
@@ -249,8 +256,27 @@ def extract_my_metrics(match_data: dict) -> dict:
     }
 
 
-def build_prompt(metrics: dict) -> str:
+def build_prompt(metrics: dict, trend_context: str | None = None) -> str:
     m = metrics
+    cs10 = m.get("cs_at_10")
+    cs10_line = f"- CS @ 10 min: {cs10}\n" if cs10 is not None else ""
+
+    if trend_context:
+        history_block = (
+            "\n## Your History & Trends\n"
+            "The following is computed from your previously analyzed games. "
+            "Use it to ground the Trend Note and, where relevant, the improvement points:\n\n"
+            f"{trend_context}\n"
+        )
+        trend_instruction = (
+            "Write 2–4 sentences using the history data above. Call out any recurring "
+            "issue and whether this game improved on it or repeated it. Reference concrete "
+            "numbers (your average vs this game). Do not invent history not shown above."
+        )
+    else:
+        history_block = ""
+        trend_instruction = "*(Skipped — insufficient match history for trend analysis.)*"
+
     return f"""You are an experienced Dota 2 coach reviewing a match replay. Below are the stats from my game. Write a coaching report in clean markdown.
 
 CRITICAL RULES — follow these exactly or the report is useless:
@@ -268,7 +294,7 @@ CRITICAL RULES — follow these exactly or the report is useless:
 - KDA: {m['kills']}/{m['deaths']}/{m['assists']} ({m['kda']:.2f})
 - GPM / XPM: {m['gpm']} / {m['xpm']}
 - Last Hits / Denies: {m['last_hits']} / {m['denies']} ({m['lh_per_min']} LH/min)
-- Net Worth: {m['net_worth']:,} gold
+{cs10_line}- Net Worth: {m['net_worth']:,} gold
 - Hero Damage: {m['hero_damage']:,}
 - Tower Damage: {m['tower_damage']:,}
 - Hero Healing: {m['hero_healing']:,}
@@ -279,7 +305,7 @@ CRITICAL RULES — follow these exactly or the report is useless:
 - Actions per Minute: {m['actions_per_min']}
 - Pings: {m['pings']}
 - Early items purchased: {', '.join(m['first_items']) if m['first_items'] else 'unknown'}
-
+{history_block}
 ---
 
 Write a coaching report with these exact sections:
@@ -299,14 +325,14 @@ For each point: name the issue, tie it to a specific stat from the data above, a
 One single, actionable sentence. The single most impactful thing to work on.
 
 ## Trend Note
-*(Skipped — insufficient match history for trend analysis.)*
+{trend_instruction}
 
 Keep the report under 600 words. Be honest, data-driven, and specific to this hero and role. Do not be sycophantic."""
 
 
-def generate_report(metrics: dict) -> str:
+def generate_report(metrics: dict, trend_context: str | None = None) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    prompt = build_prompt(metrics)
+    prompt = build_prompt(metrics, trend_context=trend_context)
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=2048,
@@ -347,8 +373,23 @@ def analyze_match(match_id: int, conn=None, print_report: bool = True) -> bool:
         print(f"Error: {e}")
         return False
 
+    # Build the rolling profile from prior games (excluding this one), detect
+    # this game's findings, and assemble trend context for the prompt.
+    trend_context = None
+    current_findings = []
+    if conn is not None:
+        history = db.get_matches(conn, exclude_match_id=match_id)
+        prof = player_profile.compute_profile(history, position=metrics.get("position"))
+        current_findings = player_profile.detect_findings(metrics, prof)
+        recent_findings = db.get_recent_findings(conn, match_limit=player_profile.RECENT_WINDOW)
+        trend_context = player_profile.build_trend_context(
+            metrics, prof, current_findings, recent_findings
+        )
+        if trend_context:
+            print(f"  Using history from {prof['n_total']} prior game(s) for trend analysis.")
+
     print("Generating coaching report with Claude (claude-sonnet-4-6)...")
-    report = generate_report(metrics)
+    report = generate_report(metrics, trend_context=trend_context)
 
     reports_dir = Path("reports")
     reports_dir.mkdir(exist_ok=True)
@@ -356,6 +397,7 @@ def analyze_match(match_id: int, conn=None, print_report: bool = True) -> bool:
     report_path.write_text(report, encoding="utf-8")
 
     if conn is not None:
+        db.save_findings(conn, match_id, current_findings)
         db.save_match(conn, metrics)
 
     if print_report:
@@ -383,6 +425,9 @@ def cmd_check(args):
         recent = fetch_recent_matches(ACCOUNT_ID, limit=args.limit)
         processed = db.get_processed_ids(conn)
         new_matches = [m for m in recent if m.get("match_id") not in processed]
+        # recentMatches is newest-first; process oldest-first so the rolling
+        # profile and trend findings accumulate in chronological order.
+        new_matches.reverse()
 
         print(f"{len(recent)} recent matches found; "
               f"{len(processed)} already processed; {len(new_matches)} new.")
