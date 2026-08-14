@@ -503,14 +503,15 @@ def find_new_matches(conn, limit: int, include_all: bool):
     return recent, eligible, new_matches
 
 
-def process_matches(conn, new_matches, notify: bool = False) -> int:
-    """Analyze each new match; optionally fire a desktop notification."""
+def process_matches(conn, new_matches, notify: bool = False,
+                    print_report: bool = True) -> int:
+    """Analyze each new match; print the report and optionally notify."""
     count = 0
     for i, m in enumerate(new_matches, 1):
         match_id = m.get("match_id")
         print(f"\n[{i}/{len(new_matches)}] Processing match {match_id}...")
         try:
-            metrics = analyze_match(match_id, conn=conn, print_report=False)
+            metrics = analyze_match(match_id, conn=conn, print_report=print_report)
             if metrics:
                 count += 1
                 if notify:
