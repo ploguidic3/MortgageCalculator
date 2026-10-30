@@ -1,0 +1,6 @@
+requests
+anthropic
+python-dotenv
+# Optional: desktop notifications for `watch`. The tool falls back to a
+# terminal banner if this isn't installed, so it's safe to remove.
+plyer
