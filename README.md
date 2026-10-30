@@ -116,7 +116,11 @@ Notes:
 
 - **OpenDota API** (free, no auth) provides match data. A match must be
   *parsed* (`version` field non-null) for full stats; the tool triggers a
-  parse and polls until it's ready.
+  parse and polls until it's ready. If OpenDota hasn't finished parsing in
+  time, `check`/`watch` skip the match and retry it on a later run rather
+  than reporting on incomplete data. Replay-only stats that aren't available
+  (ward placement, CS@10, camps stacked, teamfight participation) are never
+  treated as zero.
 - Your stats are matched out of the match's `players[]` array by account ID.
 - A clean metrics summary — not raw JSON — is sent to Claude
   (`claude-sonnet-4-6`) with guardrails against inventing hero ability

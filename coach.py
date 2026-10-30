@@ -157,23 +157,26 @@ def request_parse(match_id: int) -> str | None:
     return str(data.get("job", {}).get("jobId", ""))
 
 
-def poll_parse(job_id: str, timeout_secs: int = 300) -> bool:
-    url = f"{OPENDOTA_BASE}/request/{job_id}"
+def wait_for_parse(match_id: int, timeout_secs: int = 240):
+    """Poll until the match is parsed, by re-fetching and checking `version`.
+
+    This uses the match's own `version` field as ground truth rather than the
+    /request/{jobId} endpoint, which is unreliable. Returns the parsed match
+    dict, or None if it didn't finish parsing within the timeout.
+    """
     deadline = time.time() + timeout_secs
-    interval = 5
+    interval = 6
     while time.time() < deadline:
-        r = requests.get(url, timeout=15)
-        if r.status_code == 200:
-            data = r.json()
-            if data is None or data == {}:
-                return True
-            if isinstance(data, dict) and data.get("type") == "error":
-                print(f"  Parse job failed: {data}")
-                return False
         time.sleep(interval)
+        try:
+            match = fetch_match(match_id)
+        except requests.RequestException:
+            interval = min(interval * 1.5, 30)
+            continue
+        if match.get("version") is not None:
+            return match
         interval = min(interval * 1.5, 30)
-    print("  Parse timed out.")
-    return False
+    return None
 
 
 def extract_my_metrics(match_data: dict) -> dict:
@@ -226,21 +229,20 @@ def extract_my_metrics(match_data: dict) -> dict:
     total_gold = player.get("total_gold", 0)
     net_worth = player.get("net_worth", total_gold)
 
-    obs_placed = player.get("obs_placed", 0)
-    sen_placed = player.get("sen_placed", 0)
-    camps_stacked = player.get("camps_stacked", 0)
-    courier_kills = player.get("courier_kills", 0)
+    # Parse-only fields: these are null in unparsed matches. Use .get() with
+    # NO default so a missing value is None (unknown), never a fake 0 — a real
+    # parsed 0 (e.g. genuinely zero wards) stays 0 and is distinguishable.
+    obs_placed = player.get("obs_placed")
+    sen_placed = player.get("sen_placed")
+    camps_stacked = player.get("camps_stacked")
+    courier_kills = player.get("courier_kills")
 
-    teamfight_participation = player.get("teamfight_participation", None)
-    if teamfight_participation is None:
-        teamfight_participation = (kills + assists) / max(
-            sum(p.get("kills", 0) for p in match_data.get("players", [])
-                if (p.get("isRadiant", p.get("player_slot", 0) < 128)) == is_radiant) or 1,
-            1
-        )
+    # teamfight_participation is parse-only; leave it None when absent rather
+    # than substituting a kill-participation proxy that means something else.
+    teamfight_participation = player.get("teamfight_participation")
 
-    pings = player.get("pings", 0)
-    actions_per_min = player.get("actions_per_min", 0)
+    pings = player.get("pings")
+    actions_per_min = player.get("actions_per_min")
 
     item_slots = {
         f"item_{i}": player.get(f"item_{i}", 0) for i in range(6)
@@ -253,6 +255,7 @@ def extract_my_metrics(match_data: dict) -> dict:
 
     return {
         "match_id": match_data.get("match_id"),
+        "parsed": match_data.get("version") is not None,
         "result": "WIN" if won else "LOSS",
         "hero": hero_name,
         "role_lane": lane_role,
@@ -288,8 +291,53 @@ def extract_my_metrics(match_data: dict) -> dict:
 
 def build_prompt(metrics: dict, trend_context: str | None = None) -> str:
     m = metrics
-    cs10 = m.get("cs_at_10")
-    cs10_line = f"- CS @ 10 min: {cs10}\n" if cs10 is not None else ""
+
+    # Build the stat lines, skipping any whose value is unknown (None) — e.g.
+    # parse-only fields in a match that didn't finish parsing. Never render a
+    # missing value as 0.
+    def line(label, value, fmt=None):
+        if value is None:
+            return None
+        if fmt == "comma":
+            return f"- {label}: {value:,}"
+        return f"- {label}: {value}"
+
+    summary_lines = [
+        line("Match ID", m.get("match_id")),
+        line("Result", m.get("result")),
+        line("Hero", m.get("hero")),
+        line("Role/Lane", m.get("role_lane")),
+        line("Duration (min)", m.get("duration_min")),
+        f"- KDA: {m['kills']}/{m['deaths']}/{m['assists']} ({m['kda']:.2f})",
+        f"- GPM / XPM: {m['gpm']} / {m['xpm']}",
+        f"- Last Hits / Denies: {m['last_hits']} / {m['denies']} ({m['lh_per_min']} LH/min)",
+        line("CS @ 10 min", m.get("cs_at_10")),
+        line("Net Worth (gold)", m.get("net_worth"), "comma"),
+        line("Hero Damage", m.get("hero_damage"), "comma"),
+        line("Tower Damage", m.get("tower_damage"), "comma"),
+        line("Hero Healing", m.get("hero_healing"), "comma"),
+        line("Observer Wards Placed", m.get("obs_placed")),
+        line("Sentry Wards Placed", m.get("sen_placed")),
+        line("Camps Stacked", m.get("camps_stacked")),
+        line("Teamfight Participation", m.get("teamfight_participation")),
+        line("Actions per Minute", m.get("actions_per_min")),
+        line("Pings", m.get("pings")),
+        f"- Early items purchased: {', '.join(m['first_items']) if m.get('first_items') else 'unknown'}",
+    ]
+    summary = "\n".join(s for s in summary_lines if s)
+
+    if m.get("parsed", True):
+        parse_warning = ""
+    else:
+        parse_warning = (
+            "\n⚠️ THIS MATCH IS NOT FULLY PARSED. Replay-derived stats — ward "
+            "placement, camps stacked, CS@10, teamfight participation, lane, "
+            "actions/min — are UNAVAILABLE and are omitted above. Do NOT mention "
+            "them, do NOT assume they are zero, and do NOT fault the player for "
+            "anything you cannot see. Base the report only on the stats that ARE "
+            "listed. Note briefly that ward/vision analysis is unavailable because "
+            "the replay wasn't parsed.\n"
+        )
 
     if trend_context:
         history_block = (
@@ -333,27 +381,10 @@ CRITICAL RULES — follow these exactly or the report is useless:
 5. Do NOT judge a stat as "too high" or "too low" in absolute terms. For benchmarked stats use the percentiles below; for everything else use the player's own historical baseline. An average or above-average stat is never a weakness.
 6. Deaths and KDA have NO universal benchmark and depend heavily on role and game length. Do NOT apply absolute death thresholds. For a support in a 35+ minute game, 6–9 deaths is normal and not a problem by itself — especially in a win. Only flag deaths if they are clearly above this player's own baseline (see history) or extreme for the game's length. Supports trade their lives to save cores; that is their job.
 7. This player is high-MMR ranked. Calibrate to that — do not give beginner-level advice or treat normal high-level trades as mistakes.
-
+8. Only comment on stats that are actually listed below. If a stat is absent, it is unknown — never infer it is zero or low.
+{parse_warning}
 ## Match Summary
-- Match ID: {m['match_id']}
-- Result: {m['result']}
-- Hero: {m['hero']}
-- Role/Lane: {m['role_lane']}
-- Duration: {m['duration_min']} minutes
-- KDA: {m['kills']}/{m['deaths']}/{m['assists']} ({m['kda']:.2f})
-- GPM / XPM: {m['gpm']} / {m['xpm']}
-- Last Hits / Denies: {m['last_hits']} / {m['denies']} ({m['lh_per_min']} LH/min)
-{cs10_line}- Net Worth: {m['net_worth']:,} gold
-- Hero Damage: {m['hero_damage']:,}
-- Tower Damage: {m['tower_damage']:,}
-- Hero Healing: {m['hero_healing']:,}
-- Observer Wards Placed: {m['obs_placed']}
-- Sentry Wards Placed: {m['sen_placed']}
-- Camps Stacked: {m['camps_stacked']}
-- Teamfight Participation: {m['teamfight_participation']}
-- Actions per Minute: {m['actions_per_min']}
-- Pings: {m['pings']}
-- Early items purchased: {', '.join(m['first_items']) if m['first_items'] else 'unknown'}
+{summary}
 {benchmark_block}{history_block}
 ---
 
@@ -390,28 +421,38 @@ def generate_report(metrics: dict, trend_context: str | None = None) -> str:
     return response.content[0].text
 
 
-def analyze_match(match_id: int, conn=None, print_report: bool = True) -> bool:
+def analyze_match(match_id: int, conn=None, print_report: bool = True,
+                  skip_if_unparsed: bool = False) -> dict | None:
     """Fetch, parse, analyze a match; save the report and persist metrics.
 
     Returns the metrics dict if a report was produced, or None if the match
-    was skipped (e.g. our account wasn't in it). Pass `conn` to persist.
+    was skipped (our account wasn't in it, or it isn't parsed yet and
+    skip_if_unparsed is set). Pass `conn` to persist. Only fully parsed
+    matches are stored, so unparsed ones are retried on a later run.
     """
     print(f"Fetching match {match_id}...")
     match_data = fetch_match(match_id)
 
     if match_data.get("version") is None:
-        print("Match is not parsed. Requesting parse...")
-        job_id = request_parse(match_id)
-        if not job_id:
-            print("Failed to start parse job. Proceeding with raw data (some stats may be missing).")
+        print("Match is not parsed yet. Requesting a parse from OpenDota...")
+        try:
+            request_parse(match_id)
+        except requests.RequestException as e:
+            print(f"  Could not request parse: {e}")
+        print("Waiting for the replay to be parsed (this can take a minute)...")
+        parsed = wait_for_parse(match_id)
+        if parsed is not None:
+            print("Parse complete.")
+            match_data = parsed
         else:
-            print(f"Parse job started (id: {job_id}). Polling for completion...")
-            ok = poll_parse(job_id)
-            if ok:
-                print("Parse complete. Re-fetching match...")
-                match_data = fetch_match(match_id)
-            else:
-                print("Parse did not complete; proceeding with available data.")
+            print("Parse hasn't finished yet.")
+            if skip_if_unparsed:
+                print(f"  Skipping match {match_id} for now; it will be retried "
+                      f"on a later check once OpenDota finishes parsing.")
+                return None
+            print("  Producing a LIMITED report from unparsed data "
+                  "(ward/vision/CS stats will be unavailable). "
+                  "Re-run this match later for the full report.")
     else:
         print("Match is already parsed.")
 
@@ -421,6 +462,8 @@ def analyze_match(match_id: int, conn=None, print_report: bool = True) -> bool:
     except ValueError as e:
         print(f"Error: {e}")
         return None
+
+    is_parsed = metrics.get("parsed", False)
 
     # Build the rolling profile from prior games (excluding this one), detect
     # this game's findings, and assemble trend context for the prompt.
@@ -445,9 +488,13 @@ def analyze_match(match_id: int, conn=None, print_report: bool = True) -> bool:
     report_path = reports_dir / f"{match_id}.md"
     report_path.write_text(report, encoding="utf-8")
 
-    if conn is not None:
+    # Only persist fully parsed matches: an unparsed one has incomplete stats
+    # and must not pollute baselines or block a later full re-analysis.
+    if conn is not None and is_parsed:
         db.save_findings(conn, match_id, current_findings)
         db.save_match(conn, metrics)
+    elif conn is not None and not is_parsed:
+        print("  (Not saved to the database — will re-analyze once parsed.)")
 
     if print_report:
         print("\n" + "=" * 60)
@@ -511,7 +558,8 @@ def process_matches(conn, new_matches, notify: bool = False,
         match_id = m.get("match_id")
         print(f"\n[{i}/{len(new_matches)}] Processing match {match_id}...")
         try:
-            metrics = analyze_match(match_id, conn=conn, print_report=print_report)
+            metrics = analyze_match(match_id, conn=conn, print_report=print_report,
+                                    skip_if_unparsed=True)
             if metrics:
                 count += 1
                 if notify:
